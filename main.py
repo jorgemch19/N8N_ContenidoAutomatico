@@ -1,133 +1,180 @@
-from fastapi import FastAPI, HTTPException
-import subprocess
 import os
-import glob
+import subprocess
 import re
+import logging
+import asyncio
+from typing import List
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from pydantic import BaseModel
 
-app = FastAPI()
+# Configuración de Logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
+app = FastAPI(title="Viral Video Renderer")
+
+# Directorios
 MEDIA_DIR = "/media"
-OUTPUT_FILE = os.path.join(MEDIA_DIR, "video_final.mp4")
+OUTPUT_DIR = "/media" # O /app/output si prefieres separar
+OUTPUT_FILENAME = "video_final_viral.mp4"
 
-@app.post("/generate")
-def generate_video():
+# --- UTILIDADES ---
+
+def natural_sort_key(s):
+    """Permite ordenar p1_1, p1_2, p1_10 correctamente."""
+    return [int(text) if text.isdigit() else text.lower()
+            for text in re.split('([0-9]+)', s)]
+
+def get_image_files(limit: int = 3) -> List[str]:
+    """Obtiene las primeras N imágenes ordenadas numéricamente."""
+    files = [f for f in os.listdir(MEDIA_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+    files.sort(key=natural_sort_key)
+    return files[:limit]
+
+# --- MOTOR DE RENDERIZADO ---
+
+def generate_ffmpeg_command(images: List[str], img_duration: float = 3.0, transition_duration: float = 0.5):
     """
-    Endpoint para ser llamado desde n8n.
-    Busca 3 imágenes, aplica Ken Burns, transiciones xfade, 
-    audio ducking y hardbakes de subtítulos.
+    Construye un comando FFmpeg complejo con Ken Burns y Transiciones Xfade.
     """
     
-    # 1. Búsqueda y ordenación natural de imágenes (1, 2, 3...)
-    image_files = glob.glob(os.path.join(MEDIA_DIR, "p1_*.png"))
+    inputs = []
+    filter_complex = []
     
-    def extract_number(filename):
-        match = re.search(r'p1_(\d+)\.png', filename)
-        return int(match.group(1)) if match else 0
+    # 1. Preparar Inputs y Efecto Ken Burns (Zoom)
+    # El zoompan requiere un framerate explícito y duración en frames (25fps * 3s = 75 frames)
+    # Añadimos un buffer extra a la duración para asegurar que hay suficiente 'cola' para la transición
+    total_frames = int((img_duration + transition_duration) * 30) 
+    
+    for i, img in enumerate(images):
+        inputs.extend(['-loop', '1', '-t', str(img_duration + transition_duration), '-i', os.path.join(MEDIA_DIR, img)])
         
-    image_files.sort(key=extract_number)
-    images = image_files[:3] # Tomar estrictamente las 3 primeras
+        # Efecto: Zoom suave hacia adentro (1.0 -> 1.15)
+        # scale=-1:1920 y crop=1080:1920 aseguran formato vertical perfecto antes del zoom
+        filter_complex.append(
+            f"[{i}:v]scale=-2:1920,crop=1080:1920:center:center,"
+            f"zoompan=z='min(zoom+0.0015,1.2)':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920:fps=30,"
+            f"format=yuv420p[v{i}]"
+        )
 
-    if len(images) < 3:
-        raise HTTPException(status_code=400, detail="No hay suficientes imágenes. Se requieren al menos 3 en /media.")
+    # 2. Encadenar Transiciones (Xfade)
+    # Lógica: v0 + v1 -> m1; m1 + v2 -> m2...
+    # Xfade offset calculation:
+    # Transición 1 empieza en: duration - trans_duration
+    # Transición 2 empieza en: (duration - trans_duration) + (duration - trans_duration) ...
+    
+    current_stream = "[v0]"
+    accumulated_time = 0.0
+    
+    # Lista de transiciones "premium" para rotar
+    transitions = ['distance', 'slidedown', 'wiperight', 'circlecrop', 'rectcrop']
+    
+    for i in range(1, len(images)):
+        next_stream = f"[v{i}]"
+        output_stream = f"[v_out{i}]" if i < len(images) - 1 else "[video_final]"
+        
+        # El offset es el tiempo acumulado donde debe empezar la transición
+        offset = (img_duration * i) - (transition_duration * i)
+        
+        # Elegir transición basada en índice (cíclico)
+        trans_effect = transitions[(i-1) % len(transitions)]
+        
+        filter_complex.append(
+            f"{current_stream}{next_stream}xfade=transition={trans_effect}:duration={transition_duration}:offset={offset}{output_stream}"
+        )
+        current_stream = output_stream
 
-    # 2. Rutas de Audio y Subtítulos
-    voice_audio = os.path.join(MEDIA_DIR, "p1_audio_guion.wav")
-    bgm_audio = os.path.join(MEDIA_DIR, "taudio-1.mp3")
-    subs_file = os.path.join(MEDIA_DIR, "p1_subtitulos.ass")
+    # Unir todo el filtro
+    full_filter = ";".join(filter_complex)
     
-    has_voice = os.path.exists(voice_audio)
-    has_bgm = os.path.exists(bgm_audio)
-    has_subs = os.path.exists(subs_file)
-
-    # 3. Construcción del Filtergraph (El núcleo de la magia visual)
-    # Explicación de matemática: 3 segundos a 30fps = 90 frames (d=90).
-    # Las transiciones duran 0.5s. Img1 (0 a 3s), Img2 entra en 2.5s, Img3 entra en 5.0s. 
-    # Total de video: 8.0 segundos.
-    
-    filter_complex = f"""
-    [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v0_s];
-    [v0_s]zoompan=z='1.0+0.0015*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v0];
-    
-    [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v1_s];
-    [v1_s]zoompan=z='1.09-0.0015*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v1];
-    
-    [2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v2_s];
-    [v2_s]zoompan=z='1.05':x='x+1':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v2];
-    
-    [v0][v1]xfade=transition=smoothleft:duration=0.5:offset=2.5[x1];
-    [x1][v2]xfade=transition=smoothdown:duration=0.5:offset=5.0[vout_video];
-    """
-    
-    current_video_label = "[vout_video]"
-
-    # 4. Inserción de Subtítulos (.ass) en el stream visual
-    if has_subs:
-        # Importante: Como ejecutamos ffmpeg en cwd=MEDIA_DIR, solo pasamos el nombre del archivo
-        subs_filename = os.path.basename(subs_file)
-        filter_complex += f"{current_video_label}ass='{subs_filename}'[vout_final];\n"
-        current_video_label = "[vout_final]"
-
-    # 5. Tratamiento de Audio (Ducking 100% voz / 7% BGM)
-    # Los índices de entrada de audio dependerán de si existen.
-    # [0,1,2] son imágenes. Voice será [3], BGM será [4].
-    if has_voice and has_bgm:
-        filter_complex += "[3:a]volume=1.0[a_v]; [4:a]volume=0.07[a_b]; [a_v][a_b]amix=inputs=2:duration=first:dropout_transition=2[aout];\n"
-        current_audio_label = "[aout]"
-    elif has_voice:
-        filter_complex += "[3:a]volume=1.0[aout];\n"
-        current_audio_label = "[aout]"
-    elif has_bgm:
-        filter_complex += "[3:a]volume=0.07[aout];\n"
-        current_audio_label = "[aout]"
-    else:
-        current_audio_label = None
-
-    # 6. Ensamblado del Comando FFmpeg
+    # Comando final
     cmd = [
-        "ffmpeg", "-y",
-        "-loop", "1", "-t", "3", "-i", images[0],
-        "-loop", "1", "-t", "3", "-i", images[1],
-        "-loop", "1", "-t", "3", "-i", images[2],
+        "ffmpeg",
+        "-y", # Sobrescribir
     ]
     
-    if has_voice: cmd.extend(["-i", voice_audio])
-    if has_bgm:   cmd.extend(["-i", bgm_audio])
+    # Agregar todos los inputs
+    cmd.extend(inputs)
     
-    cmd.extend([
-        "-filter_complex", filter_complex,
-        "-map", current_video_label
-    ])
+    # Agregar el filtro complejo
+    cmd.extend(["-filter_complex", full_filter])
     
-    if current_audio_label:
-        cmd.extend(["-map", current_audio_label])
-        
+    # Mapear el último stream generado como video salida
+    cmd.extend(["-map", "[video_final]"])
+    
+    # Codecs y optimización
     cmd.extend([
         "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-t", "8.0",  # Fuerza el renderizado a 8 segundos exactos
-        OUTPUT_FILE
+        "-preset", "medium",
+        "-crf", "23", # Calidad visual alta
+        "-pix_fmt", "yuv420p", # Compatibilidad máxima
+        "-an", # Sin audio por ahora (como solicitado en esta etapa)
+        os.path.join(OUTPUT_DIR, OUTPUT_FILENAME)
     ])
+    
+    return cmd
 
-    # 7. Ejecución de proceso Headless
+def run_render_task():
+    """Función que ejecuta FFmpeg y maneja errores."""
+    logger.info("Iniciando renderizado de video viral...")
+    
     try:
-        # cwd=MEDIA_DIR es crítico para que el filtro ass= encuentre la fuente
-        subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=MEDIA_DIR)
+        images = get_image_files(limit=3)
+        if len(images) < 3:
+            logger.error(f"Se requieren al menos 3 imágenes, encontradas: {len(images)}")
+            return
+
+        cmd = generate_ffmpeg_command(images, img_duration=3.0, transition_duration=0.7)
         
-        # Limpieza opcional de imágenes si se requiere no acumular basura (descomentar)
-        # for img in images: os.remove(img)
+        logger.info(f"Ejecutando comando FFmpeg: {' '.join(cmd)}")
+        
+        # Ejecutamos proceso capturando salida para logs
+        process = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        if process.returncode != 0:
+            logger.error(f"FFmpeg falló:\n{process.stderr}")
+        else:
+            logger.info(f"Renderizado completado exitosamente: {OUTPUT_FILENAME}")
             
-        return {
-            "status": "success",
-            "message": "Video viral generado exitosamente",
-            "file": OUTPUT_FILE,
-            "duration": "8.0s"
-        }
-        
-    except subprocess.CalledProcessError as e:
-        # Captura y muestra los logs nativos de C++ de FFmpeg para fácil debugging en EasyPanel
-        error_msg = f"FFmpeg failed. \nStdout: {e.stdout} \nStderr: {e.stderr}"
-        print(error_msg) 
-        raise HTTPException(status_code=500, detail="Error en procesamiento multimedia. Revisa los logs del contenedor.")
+    except Exception as e:
+        logger.exception(f"Error crítico durante el renderizado: {e}")
+
+# --- API ENDPOINTS ---
+
+class RenderRequest(BaseModel):
+    # Puedes extender esto para recibir parámetros desde n8n
+    webhook_url: str = None
+
+@app.get("/")
+def health_check():
+    return {"status": "online", "service": "Video Renderer"}
+
+@app.post("/render")
+async def trigger_render(background_tasks: BackgroundTasks):
+    """
+    Endpoint para n8n.
+    Lanza el proceso en segundo plano y responde rápido.
+    """
+    # Verificamos que existan archivos
+    files = get_image_files()
+    if not files:
+        raise HTTPException(status_code=404, detail="No se encontraron imágenes en /media")
+
+    # Ejecutamos la tarea pesada en background para no bloquear la request HTTP
+    background_tasks.add_task(run_render_task)
+    
+    return {
+        "status": "processing_started",
+        "message": "El video se está generando en segundo plano.",
+        "assets_found": files
+    }
+
+if __name__ == "__main__":
+    # Esto es solo para testing local fuera de Docker
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
