@@ -2,7 +2,7 @@ import os
 import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, afx
+from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -10,7 +10,7 @@ MEDIA_FOLDER = "/media"
 class VideoRequest(BaseModel):
     prefix: str
     output_name: str
-    audio_bg: str = "taudio-1.mp3" # Valor por defecto
+    audio_bg: str = "taudio-1.mp3"
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
@@ -19,9 +19,8 @@ def natural_sort_key(s):
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
-        # 1. Rutas de archivos
+        # 1. Configuración de rutas
         audio_main_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_audio_guion.mp3")
-        # Si no existe mp3, probamos wav
         if not os.path.exists(audio_main_path):
             audio_main_path = audio_main_path.replace(".mp3", ".wav")
             
@@ -29,44 +28,55 @@ def crear_video(req: VideoRequest):
         subs_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_subtitulos.ass")
         output_path = os.path.join(MEDIA_FOLDER, req.output_name)
 
-        # 2. Cargar Audio Principal y medir duración
-        if not os.path.exists(audio_main_path):
-            raise HTTPException(status_code=404, detail=f"No falta audio guion en {audio_main_path}")
-        
+        # 2. Audio
         main_audio = AudioFileClip(audio_main_path)
         duration = main_audio.duration
-
-        # 3. Cargar Audio de Fondo (loop y volumen bajo)
+        
         if os.path.exists(bg_music_path):
-            bg_audio = AudioFileClip(bg_music_path).volumex(0.1) # Volumen al 10%
-            # Hacer que el fondo dure lo mismo que el principal
-            bg_audio = bg_audio.set_duration(duration)
+            bg_audio = AudioFileClip(bg_music_path).volumex(0.1).set_duration(duration)
             final_audio = CompositeAudioClip([main_audio, bg_audio])
         else:
             final_audio = main_audio
 
-        # 4. Procesar Imágenes
-        search_pattern = f"{req.prefix}_"
+        # 3. Procesar Imágenes con efecto Zoom
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
-                     if f.startswith(search_pattern) and f.endswith(('.png', '.jpg', '.jpeg'))]
+                     if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
 
-        if not img_files:
-            raise HTTPException(status_code=404, detail="No se encontraron imágenes")
+        num_images = len(img_files)
+        # Duración base de cada imagen
+        base_duration = duration / num_images
+        # Tiempo de transición (crossfade)
+        transition_time = 0.5 
 
-        # Calcular cuánto dura cada imagen para llenar el tiempo del audio
-        duration_per_img = duration / len(img_files)
+        clips = []
+        for i, filename in enumerate(img_files):
+            path = os.path.join(MEDIA_FOLDER, filename)
+            
+            # Crear clip. Le sumamos el tiempo de transición para que se solapen sin acortar el video
+            clip = ImageClip(path).set_duration(base_duration + transition_time)
+            
+            # --- EFECTO ZOOM (Para estilo viral) ---
+            # Escala de 1.0 a 1.2 (un zoom del 20%)
+            clip = clip.resize(lambda t: 1 + 0.04 * t) 
+            
+            # --- TRANSICIÓN ---
+            if i > 0:
+                clip = clip.crossfadein(transition_time)
+            
+            clips.append(clip)
 
-        clips = [ImageClip(os.path.join(MEDIA_FOLDER, f)).set_duration(duration_per_img) for f in img_files]
-        video = concatenate_videoclips(clips, method="compose")
+        # 4. Unir clips con solapamiento (padding negativo hace que se encabalguen)
+        video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
+        
+        # Ajustar duración exacta para que no sobren milisegundos
+        video = video.set_duration(duration)
         video = video.set_audio(final_audio)
 
-        # 5. Renderizar con Subtítulos (Usando filtro de FFmpeg)
-        # Nota: La ruta de los subs en el filtro debe ser absoluta dentro del contenedor
-        # Para que FFmpeg no se líe con las rutas en Linux, usamos este formato:
+        # 5. Renderizado final con subtítulos quemados
         video.write_videofile(
             output_path, 
-            fps=24, 
+            fps=30, # 30 fps para más fluidez en TikTok
             codec="libx264", 
             audio_codec="aac",
             ffmpeg_params=["-vf", f"ass={subs_path}"]
