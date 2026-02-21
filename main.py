@@ -7,7 +7,7 @@ from moviepy.editor import ImageClip, concatenate_videoclips
 app = FastAPI()
 
 # Esta es la carpeta compartida con n8n
-MEDIA_FOLDER = "/media_files"
+MEDIA_FOLDER = "/media"
 
 class VideoRequest(BaseModel):
     prefix: str     # El prefijo del nombre (ej: "p1")
