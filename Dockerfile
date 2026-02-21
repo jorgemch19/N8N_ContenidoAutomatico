@@ -1,26 +1,23 @@
-# Usa una imagen base de Python ligera pero robusta
+# Usa una imagen oficial de Python ligera
 FROM python:3.11-slim
 
-# Evita que Python escriba archivos .pyc y fuerza salida de logs inmediata
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Instala FFmpeg y fuentes estándar necesarias para subtítulos
+RUN apt-get update && \
+    apt-get install -y ffmpeg fonts-liberation && \
+    rm -rf /var/lib/apt/lists/*
 
-# Instala FFmpeg, soporte de fuentes y dependencias del sistema
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    fonts-liberation \
-    fontconfig \
-    && rm -rf /var/lib/apt/lists/*
-
-# Configura el directorio de trabajo
+# Establece el directorio de trabajo
 WORKDIR /app
 
-# Copia e instala las dependencias de Python
+# Copia los archivos de requerimientos e instala dependencias
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia el código fuente
 COPY main.py .
 
-# Ejecuta el script
-CMD ["python", "main.py"]
+# Expone el puerto 8000 para n8n
+EXPOSE 8000
+
+# Levanta el servidor FastAPI
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
