@@ -1,155 +1,133 @@
+from fastapi import FastAPI, HTTPException
+import subprocess
 import os
 import glob
-import logging
-import subprocess
-import sys
+import re
 
-# Configuración de Logging para EasyPanel
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+app = FastAPI()
 
-# --- CONFIGURACIÓN DE RUTAS ---
 MEDIA_DIR = "/media"
 OUTPUT_FILE = os.path.join(MEDIA_DIR, "video_final.mp4")
 
-# Variables de tiempo según el requerimiento del usuario (Test de 3 imágenes)
-IMG_VISIBLE_TIME = 3.0  # Segundos reales que se ve cada imagen
-TRANSITION_TIME = 0.5   # Segundos de la transición (se solapa)
-TOTAL_IMG_DURATION = IMG_VISIBLE_TIME + TRANSITION_TIME
-FPS = 30
-
-def get_sorted_images(directory, limit=3):
-    """Obtiene y ordena las imágenes alfanuméricamente."""
-    search_pattern = os.path.join(directory, "p1_*.png")
-    images = glob.glob(search_pattern)
+@app.post("/generate")
+def generate_video():
+    """
+    Endpoint para ser llamado desde n8n.
+    Busca 3 imágenes, aplica Ken Burns, transiciones xfade, 
+    audio ducking y hardbakes de subtítulos.
+    """
     
-    # Ordenamiento lógico: p1_1.png, p1_2.png... p1_10.png
-    images.sort(key=lambda x: int(os.path.basename(x).split('_')[1].split('.')[0]))
+    # 1. Búsqueda y ordenación natural de imágenes (1, 2, 3...)
+    image_files = glob.glob(os.path.join(MEDIA_DIR, "p1_*.png"))
     
-    if len(images) < limit:
-        logging.warning(f"Se encontraron solo {len(images)} imágenes, se esperaban {limit}.")
-        return images
-    
-    return images[:limit]
-
-def build_ffmpeg_command():
-    images = get_sorted_images(MEDIA_DIR, limit=3)
-    if not images:
-        logging.error("No se encontraron imágenes en /media. Abortando.")
-        sys.exit(1)
-
-    voice_path = os.path.join(MEDIA_DIR, "p1_audio_guion.wav")
-    music_path = os.path.join(MEDIA_DIR, "taudio-1.mp3")
-    subs_path = os.path.join(MEDIA_DIR, "p1_subtitulos.ass")
-
-    # Verificación de assets críticos
-    for path in [voice_path, music_path, subs_path]:
-        if not os.path.exists(path):
-            logging.error(f"Asset faltante crítico: {path}")
-            sys.exit(1)
-
-    num_images = len(images)
-    filter_complex = []
-    
-    # 1. TRATAMIENTO VISUAL Y EFECTO KEN BURNS
-    frames_per_img = int(TOTAL_IMG_DURATION * FPS)
-    for i in range(num_images):
-        # Escala a 9:16 llenando la pantalla sin bordes negros (crop) -> setsar asegura relación de aspecto 1:1 de pixel
-        f_scale = f"[{i}:v]format=yuv420p,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[base{i}]"
+    def extract_number(filename):
+        match = re.search(r'p1_(\d+)\.png', filename)
+        return int(match.group(1)) if match else 0
         
-        # Ken Burns: Zoom in continuo y muy sutil (de 1.0 a 1.15) paneando al centro
-        f_zoom = f"[base{i}]zoompan=z='min(zoom+0.0015,1.15)':d={frames_per_img}:x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':s=1080x1920:fps={FPS}[z{i}]"
-        
-        # Aseguramos el formato de pixel correcto después del zoom para que xfade no falle
-        f_format = f"[z{i}]format=yuv420p[v{i}]"
-        
-        filter_complex.extend([f_scale, f_zoom, f_format])
+    image_files.sort(key=extract_number)
+    images = image_files[:3] # Tomar estrictamente las 3 primeras
 
-    # 2. TRANSICIONES DE ALTA RETENCIÓN (XFADE)
-    # Seleccionamos transiciones modernas y dinámicas
-    viral_transitions = ["smoothleft", "distance", "slideright"]
+    if len(images) < 3:
+        raise HTTPException(status_code=400, detail="No hay suficientes imágenes. Se requieren al menos 3 en /media.")
+
+    # 2. Rutas de Audio y Subtítulos
+    voice_audio = os.path.join(MEDIA_DIR, "p1_audio_guion.wav")
+    bgm_audio = os.path.join(MEDIA_DIR, "taudio-1.mp3")
+    subs_file = os.path.join(MEDIA_DIR, "p1_subtitulos.ass")
     
-    last_out = "v0"
-    for i in range(1, num_images):
-        offset = i * IMG_VISIBLE_TIME  # Matemáticamente exacto para encadenar
-        t_type = viral_transitions[(i-1) % len(viral_transitions)]
-        out_node = f"v_trans{i}" if i < num_images - 1 else "v_out"
-        
-        # xfade combina el output anterior con la imagen actual
-        f_xfade = f"[{last_out}][v{i}]xfade=transition={t_type}:duration={TRANSITION_TIME}:offset={offset}[{out_node}]"
-        filter_complex.append(f_xfade)
-        last_out = out_node
+    has_voice = os.path.exists(voice_audio)
+    has_bgm = os.path.exists(bgm_audio)
+    has_subs = os.path.exists(subs_file)
 
-    # 3. HARDBAKING DE SUBTÍTULOS (.ASS)
-    # Escapamos la ruta para evitar problemas con el filtro de FFmpeg
-    escaped_subs = subs_path.replace("\\", "/").replace(":", "\\:")
-    f_subs = f"[{last_out}]ass='{escaped_subs}'[v_final]"
-    filter_complex.append(f_subs)
-
-    # 4. TRATAMIENTO DE AUDIO (DUCKING)
-    idx_voice = num_images
-    idx_music = num_images + 1
+    # 3. Construcción del Filtergraph (El núcleo de la magia visual)
+    # Explicación de matemática: 3 segundos a 30fps = 90 frames (d=90).
+    # Las transiciones duran 0.5s. Img1 (0 a 3s), Img2 entra en 2.5s, Img3 entra en 5.0s. 
+    # Total de video: 8.0 segundos.
     
-    # Volumen: Voz al 100%, Música al 7%
-    # amix mezcla ambos. duration=longest asegura que la mezcla siga hasta que acabe el más largo
-    f_audio = f"[{idx_voice}:a]volume=1.0[voice];[{idx_music}:a]volume=0.07[bgm];[voice][bgm]amix=inputs=2:duration=longest[a_final]"
-    filter_complex.append(f_audio)
-
-    # --- CONSTRUCCIÓN DEL COMANDO FFMPEG ---
-    cmd = ["ffmpeg", "-y", "-hide_banner"]
-
-    # Añadir inputs de imágenes
-    for img in images:
-        cmd.extend(["-loop", "1", "-t", str(TOTAL_IMG_DURATION), "-i", img])
+    filter_complex = f"""
+    [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v0_s];
+    [v0_s]zoompan=z='1.0+0.0015*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v0];
     
-    # Añadir inputs de audio
-    cmd.extend(["-i", voice_path, "-i", music_path])
+    [1:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v1_s];
+    [v1_s]zoompan=z='1.09-0.0015*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v1];
+    
+    [2:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[v2_s];
+    [v2_s]zoompan=z='1.05':x='x+1':y='ih/2-(ih/zoom/2)':d=90:fps=30:s=1080x1920,format=yuv420p[v2];
+    
+    [v0][v1]xfade=transition=smoothleft:duration=0.5:offset=2.5[x1];
+    [x1][v2]xfade=transition=smoothdown:duration=0.5:offset=5.0[vout_video];
+    """
+    
+    current_video_label = "[vout_video]"
 
-    # Añadir el grafo de filtros complejos
-    cmd.extend(["-filter_complex", ";".join(filter_complex)])
+    # 4. Inserción de Subtítulos (.ass) en el stream visual
+    if has_subs:
+        # Importante: Como ejecutamos ffmpeg en cwd=MEDIA_DIR, solo pasamos el nombre del archivo
+        subs_filename = os.path.basename(subs_file)
+        filter_complex += f"{current_video_label}ass='{subs_filename}'[vout_final];\n"
+        current_video_label = "[vout_final]"
 
-    # Mapeo de salidas y parámetros de codificación para redes sociales
+    # 5. Tratamiento de Audio (Ducking 100% voz / 7% BGM)
+    # Los índices de entrada de audio dependerán de si existen.
+    # [0,1,2] son imágenes. Voice será [3], BGM será [4].
+    if has_voice and has_bgm:
+        filter_complex += "[3:a]volume=1.0[a_v]; [4:a]volume=0.07[a_b]; [a_v][a_b]amix=inputs=2:duration=first:dropout_transition=2[aout];\n"
+        current_audio_label = "[aout]"
+    elif has_voice:
+        filter_complex += "[3:a]volume=1.0[aout];\n"
+        current_audio_label = "[aout]"
+    elif has_bgm:
+        filter_complex += "[3:a]volume=0.07[aout];\n"
+        current_audio_label = "[aout]"
+    else:
+        current_audio_label = None
+
+    # 6. Ensamblado del Comando FFmpeg
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-t", "3", "-i", images[0],
+        "-loop", "1", "-t", "3", "-i", images[1],
+        "-loop", "1", "-t", "3", "-i", images[2],
+    ]
+    
+    if has_voice: cmd.extend(["-i", voice_audio])
+    if has_bgm:   cmd.extend(["-i", bgm_audio])
+    
     cmd.extend([
-        "-map", "[v_final]",
-        "-map", "[a_final]",
+        "-filter_complex", filter_complex,
+        "-map", current_video_label
+    ])
+    
+    if current_audio_label:
+        cmd.extend(["-map", current_audio_label])
+        
+    cmd.extend([
         "-c:v", "libx264",
-        "-preset", "fast",     # Balance entre velocidad de render en docker y compresión
-        "-crf", "23",          # Calidad visual alta
+        "-preset", "fast",
+        "-crf", "23",
         "-c:a", "aac",
         "-b:a", "192k",
-        "-shortest",           # Corta el video cuando el stream visual termine (9 segundos)
+        "-t", "8.0",  # Fuerza el renderizado a 8 segundos exactos
         OUTPUT_FILE
     ])
 
-    return cmd
-
-def run_ffmpeg(cmd):
-    logging.info("Iniciando renderizado con FFmpeg...")
-    logging.info(f"Comando: {' '.join(cmd)}")
-    
+    # 7. Ejecución de proceso Headless
     try:
-        # Ejecutar ffmpeg, capturar salida para logs de EasyPanel
-        process = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=True
-        )
-        logging.info("¡Renderizado completado con éxito!")
-        logging.info(f"Video guardado en: {OUTPUT_FILE}")
+        # cwd=MEDIA_DIR es crítico para que el filtro ass= encuentre la fuente
+        subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=MEDIA_DIR)
+        
+        # Limpieza opcional de imágenes si se requiere no acumular basura (descomentar)
+        # for img in images: os.remove(img)
+            
+        return {
+            "status": "success",
+            "message": "Video viral generado exitosamente",
+            "file": OUTPUT_FILE,
+            "duration": "8.0s"
+        }
+        
     except subprocess.CalledProcessError as e:
-        logging.error("Falló la ejecución de FFmpeg.")
-        logging.error(f"FFmpeg Output Log:\n{e.stdout}")
-        sys.exit(1)
-    finally:
-        # Limpieza de temporales (Si hubiéramos creado archivos txt intermedios se borrarían aquí)
-        pass
-
-if __name__ == "__main__":
-    logging.info("Iniciando motor de automatización de video (Modo Transiciones de Alta Retención)...")
-    ffmpeg_cmd = build_ffmpeg_command()
-    run_ffmpeg(ffmpeg_cmd)
+        # Captura y muestra los logs nativos de C++ de FFmpeg para fácil debugging en EasyPanel
+        error_msg = f"FFmpeg failed. \nStdout: {e.stdout} \nStderr: {e.stderr}"
+        print(error_msg) 
+        raise HTTPException(status_code=500, detail="Error en procesamiento multimedia. Revisa los logs del contenedor.")
