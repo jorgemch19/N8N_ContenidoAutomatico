@@ -21,36 +21,38 @@ def natural_sort_key(s):
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
+        # Esto nos dirá qué archivos hay realmente en la carpeta
+        todos_los_archivos = os.listdir(MEDIA_FOLDER)
+        print(f"Contenido de la carpeta: {todos_los_archivos}")
+
         # 1. Buscar archivos que empiecen con el prefijo (ej: p1_)
         search_pattern = f"{req.prefix}_"
-        files = [f for f in os.listdir(MEDIA_FOLDER) 
+        files = [f for f in todos_los_archivos 
                  if f.startswith(search_pattern) and f.endswith(('.png', '.jpg', '.jpeg'))]
         
         # 2. Ordenarlos correctamente
         files.sort(key=natural_sort_key)
 
         if not files:
-            raise HTTPException(status_code=404, detail=f"No encontré imágenes que empiecen con {req.prefix} en {MEDIA_FOLDER}")
+            # Ahora el error nos dirá qué archivos encontró en lugar de nada
+            raise HTTPException(status_code=404, detail={
+                "mensaje": f"No encontré imágenes con prefijo {req.prefix}",
+                "archivos_vistos": todos_los_archivos,
+                "ruta_buscada": MEDIA_FOLDER
+            })
 
-        # 3. Crear el video
+        # ... (el resto del código sigue igual)
         clips = []
         for filename in files:
             path = os.path.join(MEDIA_FOLDER, filename)
-            # Cada imagen dura 2 segundos
             clip = ImageClip(path).set_duration(2)
             clips.append(clip)
 
-        # Unir clips
         final_video = concatenate_videoclips(clips, method="compose")
-        
-        # Ruta de salida
         output_path = os.path.join(MEDIA_FOLDER, req.output_name)
-        
-        # Guardar (24 fps es suficiente para imágenes estáticas)
         final_video.write_videofile(output_path, fps=24, codec="libx264")
 
         return {"estado": "ok", "archivo": output_path, "imagenes_usadas": len(files)}
 
     except Exception as e:
-        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
