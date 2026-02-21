@@ -19,7 +19,7 @@ def natural_sort_key(s):
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
-        # 1. Configuración de rutas
+        # 1. Rutas
         audio_main_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_audio_guion.mp3")
         if not os.path.exists(audio_main_path):
             audio_main_path = audio_main_path.replace(".mp3", ".wav")
@@ -38,52 +38,57 @@ def crear_video(req: VideoRequest):
         else:
             final_audio = main_audio
 
-        # 3. Procesar Imágenes con efecto Zoom
+        # 3. Procesar Imágenes con Zoom Dinámico
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
 
         num_images = len(img_files)
-        # Duración base de cada imagen
         base_duration = duration / num_images
-        # Tiempo de transición (crossfade)
-        transition_time = 0.5 
+        transition_time = 0.6  # Un poco más de transición para que se vea suave
 
         clips = []
         for i, filename in enumerate(img_files):
             path = os.path.join(MEDIA_FOLDER, filename)
             
-            # Crear clip. Le sumamos el tiempo de transición para que se solapen sin acortar el video
-            clip = ImageClip(path).set_duration(base_duration + transition_time)
+            # Cada clip dura su tiempo base + el solapamiento de la transición
+            clip_duration = base_duration + transition_time
+            clip = ImageClip(path).set_duration(clip_duration)
             
-            # --- EFECTO ZOOM (Para estilo viral) ---
-            # Escala de 1.0 a 1.2 (un zoom del 20%)
-            clip = clip.resize(lambda t: 1 + 0.02 * t) 
+            # --- EFECTO ZOOM ALTERNADO (In/Out) ---
+            zoom_speed = 0.1 # Nivel de zoom (10%)
             
-            # --- TRANSICIÓN ---
+            if i % 2 == 0:
+                # IMAGEN PAR: Zoom In (1.0 -> 1.1)
+                clip = clip.resize(lambda t: 1 + (zoom_speed * t / clip_duration))
+            else:
+                # IMAGEN IMPAR: Zoom Out (1.1 -> 1.0)
+                clip = clip.resize(lambda t: (1 + zoom_speed) - (zoom_speed * t / clip_duration))
+            
+            # Aplicar transición de entrada (excepto al primero)
             if i > 0:
                 clip = clip.crossfadein(transition_time)
             
             clips.append(clip)
 
-        # 4. Unir clips con solapamiento (padding negativo hace que se encabalguen)
+        # 4. Unir clips con padding negativo para el fundido
         video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
-        
-        # Ajustar duración exacta para que no sobren milisegundos
         video = video.set_duration(duration)
         video = video.set_audio(final_audio)
 
-        # 5. Renderizado final con subtítulos quemados
+        # 5. Renderizar con Subtítulos
         video.write_videofile(
             output_path, 
-            fps=30, # 30 fps para más fluidez en TikTok
+            fps=30, 
             codec="libx264", 
             audio_codec="aac",
+            temp_audiofile="/tmp/temp-audio.m4a", # Archivo temporal de audio
+            remove_temp=True,
             ffmpeg_params=["-vf", f"ass={subs_path}"]
         )
 
-        return {"estado": "ok", "video": req.output_name, "duracion": duration}
+        return {"estado": "ok", "video": req.output_name}
 
     except Exception as e:
-        print(f"ERROR: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+``
