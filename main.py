@@ -6,7 +6,7 @@ from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, Com
 import moviepy.video.fx.all as vfx
 
 app = FastAPI()
-MEDIA_FOLDER = "/media_files"
+MEDIA_FOLDER = "/media"
 
 class VideoRequest(BaseModel):
     prefix: str
