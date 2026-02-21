@@ -45,50 +45,42 @@ def crear_video(req: VideoRequest):
 
         num_images = len(img_files)
         base_duration = duration / num_images
-        transition_time = 0.6  # Un poco más de transición para que se vea suave
+        transition_time = 0.6 
 
         clips = []
         for i, filename in enumerate(img_files):
             path = os.path.join(MEDIA_FOLDER, filename)
-            
-            # Cada clip dura su tiempo base + el solapamiento de la transición
             clip_duration = base_duration + transition_time
             clip = ImageClip(path).set_duration(clip_duration)
             
-            # --- EFECTO ZOOM ALTERNADO (In/Out) ---
-            zoom_speed = 0.1 # Nivel de zoom (10%)
-            
+            # --- EFECTO ZOOM ALTERNADO ---
+            zoom_speed = 0.1 
             if i % 2 == 0:
-                # IMAGEN PAR: Zoom In (1.0 -> 1.1)
                 clip = clip.resize(lambda t: 1 + (zoom_speed * t / clip_duration))
             else:
-                # IMAGEN IMPAR: Zoom Out (1.1 -> 1.0)
                 clip = clip.resize(lambda t: (1 + zoom_speed) - (zoom_speed * t / clip_duration))
             
-            # Aplicar transición de entrada (excepto al primero)
             if i > 0:
                 clip = clip.crossfadein(transition_time)
             
             clips.append(clip)
 
-        # 4. Unir clips con padding negativo para el fundido
+        # 4. Unir clips
         video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
         video = video.set_duration(duration)
         video = video.set_audio(final_audio)
 
-        # 5. Renderizar con Subtítulos
+        # 5. Renderizar
         video.write_videofile(
             output_path, 
             fps=30, 
             codec="libx264", 
             audio_codec="aac",
-            temp_audiofile="/tmp/temp-audio.m4a", # Archivo temporal de audio
-            remove_temp=True,
             ffmpeg_params=["-vf", f"ass={subs_path}"]
         )
 
         return {"estado": "ok", "video": req.output_name}
 
     except Exception as e:
+        print(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-``
