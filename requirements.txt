@@ -1,4 +1,4 @@
 fastapi
 uvicorn
 python-multipart
-# No necesitamos librerías de video de Python, usamos FFmpeg nativo
+requests
