@@ -58,7 +58,7 @@ def crear_video(req: VideoRequest):
             
             # --- EFECTO ZOOM (Para estilo viral) ---
             # Escala de 1.0 a 1.2 (un zoom del 20%)
-            clip = clip.resize(lambda t: 1 + 0.04 * t) 
+            clip = clip.resize(lambda t: 1 + 0.02 * t) 
             
             # --- TRANSICIÓN ---
             if i > 0:
