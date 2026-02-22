@@ -106,7 +106,7 @@ def crear_video(req: VideoRequest):
         else:
             final_audio = main_audio
 
-        # 3. Procesar Imágenes con nuestro nuevo Motor Suave
+        # 3. Procesar Imágenes
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
@@ -127,26 +127,26 @@ def crear_video(req: VideoRequest):
                 clip = clip.crossfadein(transition_time)
             clips.append(clip)
 
-        # 4. Unir clips base (Las imágenes)
+        # 4. Unir clips base
         base_video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
         base_video = base_video.set_duration(duration)
 
-        # --- EFECTO 4: AÑADIR VIÑETEADO ---
+        # --- EFECTO 4: VIÑETEADO ---
         vignette_layer = create_vignette_clip(width=1080, height=1920, duration=duration)
 
-        # --- EFECTO 5: FLASH BLANCO INICIAL ---
+        # --- EFECTO 5: FLASH BLANCO INICIAL (CORREGIDO) ---
         flash_duration = 0.5
+        # Creamos un cuadro blanco y le decimos que se desvanezca (crossfadeout) en 0.5 segundos
         white_flash = ColorClip(size=(1080, 1920), color=(255, 255, 255)).set_duration(flash_duration)
-        # Hacemos que la opacidad baje de 1.0 (sólido) a 0.0 (transparente) en 0.5 segundos
-        white_flash = white_flash.set_opacity(lambda t: max(0, 1.0 - (t / flash_duration)))
+        white_flash = white_flash.crossfadeout(flash_duration)
 
-        # Juntar todas las capas: [Fondo(imágenes), Capa de sombra(viñeteado), Destello inicial]
+        # Juntar capas: Fondo(imágenes) + Sombra(viñeteado) + Destello
         final_video = CompositeVideoClip([base_video, vignette_layer, white_flash])
         
-        # Sincronizar audio final
+        # Sincronizar audio
         final_video = final_video.set_audio(final_audio)
 
-        # 5. Renderizado (Subtítulos se queman POR ENCIMA de todos los efectos gracias a ffmpeg)
+        # 5. Renderizado
         final_video.write_videofile(
             output_path, 
             fps=30, 
