@@ -1,8 +1,10 @@
 import os
 import re
+import numpy as np
+from PIL import Image
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, CompositeVideoClip
+from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -15,6 +17,64 @@ class VideoRequest(BaseModel):
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', s)]
+
+# --- MOTOR DE ZOOM SUAVE (CERO TEMBLORES) ---
+def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, target_h=1920):
+    # Abrimos la imagen original con la máxima calidad
+    img = Image.open(img_path).convert('RGB')
+    img_w, img_h = img.size
+
+    # Calculamos cómo encajarla en 9:16 sin distorsionar
+    target_ratio = target_w / target_h
+    img_ratio = img_w / img_h
+
+    if img_ratio > target_ratio:
+        new_w = img_h * target_ratio
+        new_h = img_h
+    else:
+        new_w = img_w
+        new_h = img_w / target_ratio
+
+    # Coordenadas de la ventana base (centrada)
+    left = (img_w - new_w) / 2
+    top = (img_h - new_h) / 2
+
+    zoom_factor = 0.15 # Nivel de zoom (15%)
+    
+    # Esta función se ejecuta para cada fotograma del video
+    def make_frame(t):
+        progress = t / duration
+        
+        if zoom_in:
+            # Zoom In: La ventana se hace más pequeña (nos acercamos)
+            current_zoom = 1.0 - (zoom_factor * progress)
+        else:
+            # Zoom Out: La ventana se hace más grande (nos alejamos)
+            current_zoom = (1.0 - zoom_factor) + (zoom_factor * progress)
+        
+        # Tamaño actual de la ventana
+        current_w = new_w * current_zoom
+        current_h = new_h * current_zoom
+        
+        # Mantener la ventana siempre centrada
+        center_x = left + new_w / 2
+        center_y = top + new_h / 2
+        
+        c_left = center_x - current_w / 2
+        c_top = center_y - current_h / 2
+        c_right = center_x + current_w / 2
+        c_bottom = center_y + current_h / 2
+        
+        # Recortamos la ventana y la forzamos a 1080x1920 con calidad LANCZOS (súper suave)
+        cropped = img.crop((c_left, c_top, c_right, c_bottom))
+        resized = cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        
+        # Convertimos la imagen perfecta en un fotograma de video
+        return np.array(resized)
+
+    # Devolvemos un clip de video generado matemáticamente
+    return VideoClip(make_frame, duration=duration)
+
 
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
@@ -38,7 +98,7 @@ def crear_video(req: VideoRequest):
         else:
             final_audio = main_audio
 
-        # 3. Procesar Imágenes con la técnica de "Ventana Rígida"
+        # 3. Procesar Imágenes con nuestro nuevo Motor Suave
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
@@ -46,43 +106,23 @@ def crear_video(req: VideoRequest):
         num_images = len(img_files)
         base_duration = duration / num_images
         transition_time = 0.5 
-        
-        # Tamaño fijo para TikTok/Reels
-        TARGET_W, TARGET_H = 1080, 1920
 
         clips = []
         for i, filename in enumerate(img_files):
             path = os.path.join(MEDIA_FOLDER, filename)
             clip_duration = base_duration + transition_time
             
-            raw_clip = ImageClip(path)
+            # Pares hacen Zoom In (True), Impares hacen Zoom Out (False)
+            zoom_in = (i % 2 == 0)
             
-            # PASO A: Escalar la imagen para que CUBRA toda la pantalla + un 15% extra de seguridad
-            scale_to_fill = max(TARGET_W / raw_clip.w, TARGET_H / raw_clip.h)
-            base_scale = scale_to_fill * 1.15
-            base_clip = raw_clip.resize(base_scale)
+            # Usamos la función mágica
+            clip = create_smooth_zoom_clip(path, clip_duration, zoom_in=zoom_in)
             
-            # PASO B: Aplicar Zoom Dinámico
-            zoom_speed = 0.1
-            if i % 2 == 0:
-                # Zoom IN: De 1.0 (que ya es más grande que la pantalla) a 1.1
-                moving_clip = base_clip.resize(lambda t: 1.0 + (zoom_speed * t / clip_duration))
-            else:
-                # Zoom OUT: De 1.1 a 1.0
-                moving_clip = base_clip.resize(lambda t: (1.0 + zoom_speed) - (zoom_speed * t / clip_duration))
-            
-            # PASO C: El truco final. Meter la imagen que se mueve dentro de una ventana rígida
-            # Esto recorta mágicamente los bordes y la mantiene SIEMPRE perfectamente centrada.
-            final_clip = CompositeVideoClip(
-                [moving_clip.set_position('center')],
-                size=(TARGET_W, TARGET_H)
-            ).set_duration(clip_duration)
-            
-            # PASO D: Transición de fundido
+            # Transición
             if i > 0:
-                final_clip = final_clip.crossfadein(transition_time)
+                clip = clip.crossfadein(transition_time)
             
-            clips.append(final_clip)
+            clips.append(clip)
 
         # 4. Unir clips
         video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
