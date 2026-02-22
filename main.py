@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, CompositeVideoClip
 
 app = FastAPI()
-MEDIA_FOLDER = "/media_files"
+MEDIA_FOLDER = "/media"
 
 class VideoRequest(BaseModel):
     prefix: str
