@@ -1,10 +1,10 @@
 import os
 import re
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageEnhance
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip
+from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip, CompositeVideoClip, ColorClip, ImageClip
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -18,13 +18,34 @@ def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', s)]
 
-# --- MOTOR DE ZOOM SUAVE (CERO TEMBLORES) ---
-def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, target_h=1920):
-    # Abrimos la imagen original con la máxima calidad
-    img = Image.open(img_path).convert('RGB')
-    img_w, img_h = img.size
+# --- CREADOR DE VIÑETEADO OSCURO (VIGNETTE) ---
+def create_vignette_clip(width=1080, height=1920, duration=10):
+    # Crear un degradado circular matemático
+    x = np.linspace(-1, 1, width)
+    y = np.linspace(-1, 1, height)
+    X, Y = np.meshgrid(x, y)
+    R = np.sqrt(X**2 + Y**2)
+    
+    # 0 en el centro (transparente), sube hasta 0.6 (60% oscuro) en los bordes
+    mask = np.clip((R - 0.5) / 0.7, 0, 0.6)
+    
+    # Imagen negra con la máscara aplicada
+    black = np.zeros((height, width, 3), dtype=np.uint8)
+    vignette = ImageClip(black).set_duration(duration)
+    mask_clip = ImageClip(mask, ismask=True).set_duration(duration)
+    
+    return vignette.set_mask(mask_clip)
 
-    # Calculamos cómo encajarla en 9:16 sin distorsionar
+# --- MOTOR DE ZOOM SUAVE + COLOR POP ---
+def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, target_h=1920):
+    # 1. Abrimos la imagen original
+    img = Image.open(img_path).convert('RGB')
+    
+    # --- EFECTO 3: COLOR POP (Saturación y Contraste) ---
+    img = ImageEnhance.Color(img).enhance(1.3)     # +30% de color
+    img = ImageEnhance.Contrast(img).enhance(1.15) # +15% de contraste
+
+    img_w, img_h = img.size
     target_ratio = target_w / target_h
     img_ratio = img_w / img_h
 
@@ -35,28 +56,19 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
         new_w = img_w
         new_h = img_w / target_ratio
 
-    # Coordenadas de la ventana base (centrada)
     left = (img_w - new_w) / 2
     top = (img_h - new_h) / 2
-
-    zoom_factor = 0.15 # Nivel de zoom (15%)
+    zoom_factor = 0.15 
     
-    # Esta función se ejecuta para cada fotograma del video
     def make_frame(t):
         progress = t / duration
-        
         if zoom_in:
-            # Zoom In: La ventana se hace más pequeña (nos acercamos)
             current_zoom = 1.0 - (zoom_factor * progress)
         else:
-            # Zoom Out: La ventana se hace más grande (nos alejamos)
             current_zoom = (1.0 - zoom_factor) + (zoom_factor * progress)
         
-        # Tamaño actual de la ventana
         current_w = new_w * current_zoom
         current_h = new_h * current_zoom
-        
-        # Mantener la ventana siempre centrada
         center_x = left + new_w / 2
         center_y = top + new_h / 2
         
@@ -65,14 +77,10 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
         c_right = center_x + current_w / 2
         c_bottom = center_y + current_h / 2
         
-        # Recortamos la ventana y la forzamos a 1080x1920 con calidad LANCZOS (súper suave)
         cropped = img.crop((c_left, c_top, c_right, c_bottom))
         resized = cropped.resize((target_w, target_h), Image.Resampling.LANCZOS)
-        
-        # Convertimos la imagen perfecta en un fotograma de video
         return np.array(resized)
 
-    # Devolvemos un clip de video generado matemáticamente
     return VideoClip(make_frame, duration=duration)
 
 
@@ -111,26 +119,35 @@ def crear_video(req: VideoRequest):
         for i, filename in enumerate(img_files):
             path = os.path.join(MEDIA_FOLDER, filename)
             clip_duration = base_duration + transition_time
-            
-            # Pares hacen Zoom In (True), Impares hacen Zoom Out (False)
             zoom_in = (i % 2 == 0)
             
-            # Usamos la función mágica
             clip = create_smooth_zoom_clip(path, clip_duration, zoom_in=zoom_in)
             
-            # Transición
             if i > 0:
                 clip = clip.crossfadein(transition_time)
-            
             clips.append(clip)
 
-        # 4. Unir clips
-        video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
-        video = video.set_duration(duration)
-        video = video.set_audio(final_audio)
+        # 4. Unir clips base (Las imágenes)
+        base_video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
+        base_video = base_video.set_duration(duration)
 
-        # 5. Renderizado optimizado
-        video.write_videofile(
+        # --- EFECTO 4: AÑADIR VIÑETEADO ---
+        vignette_layer = create_vignette_clip(width=1080, height=1920, duration=duration)
+
+        # --- EFECTO 5: FLASH BLANCO INICIAL ---
+        flash_duration = 0.5
+        white_flash = ColorClip(size=(1080, 1920), color=(255, 255, 255)).set_duration(flash_duration)
+        # Hacemos que la opacidad baje de 1.0 (sólido) a 0.0 (transparente) en 0.5 segundos
+        white_flash = white_flash.set_opacity(lambda t: max(0, 1.0 - (t / flash_duration)))
+
+        # Juntar todas las capas: [Fondo(imágenes), Capa de sombra(viñeteado), Destello inicial]
+        final_video = CompositeVideoClip([base_video, vignette_layer, white_flash])
+        
+        # Sincronizar audio final
+        final_video = final_video.set_audio(final_audio)
+
+        # 5. Renderizado (Subtítulos se queman POR ENCIMA de todos los efectos gracias a ffmpeg)
+        final_video.write_videofile(
             output_path, 
             fps=30, 
             codec="libx264", 
