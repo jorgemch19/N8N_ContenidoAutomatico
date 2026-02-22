@@ -2,11 +2,10 @@ import os
 import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip
-import moviepy.video.fx.all as vfx
+from moviepy.editor import ImageClip, concatenate_videoclips, AudioFileClip, CompositeAudioClip, CompositeVideoClip
 
 app = FastAPI()
-MEDIA_FOLDER = "/media"
+MEDIA_FOLDER = "/media_files"
 
 class VideoRequest(BaseModel):
     prefix: str
@@ -20,7 +19,7 @@ def natural_sort_key(s):
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
-        # 1. Rutas y Archivos
+        # 1. Rutas
         audio_main_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_audio_guion.mp3")
         if not os.path.exists(audio_main_path):
             audio_main_path = audio_main_path.replace(".mp3", ".wav")
@@ -29,7 +28,7 @@ def crear_video(req: VideoRequest):
         subs_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_subtitulos.ass")
         output_path = os.path.join(MEDIA_FOLDER, req.output_name)
 
-        # 2. Cargar Audio
+        # 2. Audio
         main_audio = AudioFileClip(audio_main_path)
         duration = main_audio.duration
         
@@ -39,7 +38,7 @@ def crear_video(req: VideoRequest):
         else:
             final_audio = main_audio
 
-        # 3. Procesar Imágenes
+        # 3. Procesar Imágenes con la técnica de "Ventana Rígida"
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
@@ -47,50 +46,58 @@ def crear_video(req: VideoRequest):
         num_images = len(img_files)
         base_duration = duration / num_images
         transition_time = 0.5 
+        
+        # Tamaño fijo para TikTok/Reels
+        TARGET_W, TARGET_H = 1080, 1920
 
         clips = []
         for i, filename in enumerate(img_files):
             path = os.path.join(MEDIA_FOLDER, filename)
+            clip_duration = base_duration + transition_time
             
-            # Cargamos imagen y la forzamos a rellenar 1080x1920 (crop/resize)
-            clip = ImageClip(path).set_duration(base_duration + transition_time)
+            raw_clip = ImageClip(path)
             
-            # Redimensionar al ancho de TikTok (1080) manteniendo aspecto y recortando lo que sobre
-            clip = vfx.resize(clip, width=1080)
-            if clip.h < 1920:
-                clip = vfx.resize(clip, height=1920)
+            # PASO A: Escalar la imagen para que CUBRA toda la pantalla + un 15% extra de seguridad
+            scale_to_fill = max(TARGET_W / raw_clip.w, TARGET_H / raw_clip.h)
+            base_scale = scale_to_fill * 1.15
+            base_clip = raw_clip.resize(base_scale)
             
-            # Centrar la imagen en un lienzo de 1080x1920
-            clip = clip.on_color(size=(1080, 1920), color=(0,0,0), pos='center')
-
-            # --- NUEVA LÓGICA DE ZOOM SIN BORDES ---
-            zoom_factor = 0.15 # 15% de movimiento
-            
+            # PASO B: Aplicar Zoom Dinámico
+            zoom_speed = 0.1
             if i % 2 == 0:
-                # ZOOM IN: Empieza en 1.1 y sube a 1.25
-                clip = clip.resize(lambda t: 1.1 + (zoom_factor * t / (base_duration + transition_time)))
+                # Zoom IN: De 1.0 (que ya es más grande que la pantalla) a 1.1
+                moving_clip = base_clip.resize(lambda t: 1.0 + (zoom_speed * t / clip_duration))
             else:
-                # ZOOM OUT: Empieza en 1.25 y baja a 1.1
-                clip = clip.resize(lambda t: (1.1 + zoom_factor) - (zoom_factor * t / (base_duration + transition_time)))
+                # Zoom OUT: De 1.1 a 1.0
+                moving_clip = base_clip.resize(lambda t: (1.0 + zoom_speed) - (zoom_speed * t / clip_duration))
             
-            # Transición suave
+            # PASO C: El truco final. Meter la imagen que se mueve dentro de una ventana rígida
+            # Esto recorta mágicamente los bordes y la mantiene SIEMPRE perfectamente centrada.
+            final_clip = CompositeVideoClip(
+                [moving_clip.set_position('center')],
+                size=(TARGET_W, TARGET_H)
+            ).set_duration(clip_duration)
+            
+            # PASO D: Transición de fundido
             if i > 0:
-                clip = clip.crossfadein(transition_time)
+                final_clip = final_clip.crossfadein(transition_time)
             
-            clips.append(clip)
+            clips.append(final_clip)
 
-        # 4. Concatenación final
+        # 4. Unir clips
         video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
         video = video.set_duration(duration)
         video = video.set_audio(final_audio)
 
-        # 5. Renderizado
+        # 5. Renderizado optimizado
         video.write_videofile(
             output_path, 
             fps=30, 
             codec="libx264", 
             audio_codec="aac",
-            bitrate="5000k", # Calidad alta
+            bitrate="5000k",
+            threads=4,
+            preset="ultrafast",
             ffmpeg_params=["-vf", f"ass={subs_path}"]
         )
 
