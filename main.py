@@ -5,6 +5,7 @@ from PIL import Image, ImageEnhance
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip, CompositeVideoClip, ColorClip, ImageClip
+import moviepy.video.fx.all as vfx
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -13,38 +14,29 @@ class VideoRequest(BaseModel):
     prefix: str
     output_name: str
     audio_bg: str = "taudio-1.mp3"
+    audio_impact: str = "impacto.mp3" # Archivo del Boom inicial
+    texture_img: str = "textura.png"  # Archivo de ruido/polvo
+    cta_img: str = "cta.png"          # Archivo del logo/llamada a la acción
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower()
             for text in re.split('([0-9]+)', s)]
 
-# --- CREADOR DE VIÑETEADO OSCURO (VIGNETTE) ---
 def create_vignette_clip(width=1080, height=1920, duration=10):
-    # Crear un degradado circular matemático
     x = np.linspace(-1, 1, width)
     y = np.linspace(-1, 1, height)
     X, Y = np.meshgrid(x, y)
     R = np.sqrt(X**2 + Y**2)
-    
-    # 0 en el centro (transparente), sube hasta 0.6 (60% oscuro) en los bordes
     mask = np.clip((R - 0.5) / 0.7, 0, 0.6)
-    
-    # Imagen negra con la máscara aplicada
     black = np.zeros((height, width, 3), dtype=np.uint8)
     vignette = ImageClip(black).set_duration(duration)
     mask_clip = ImageClip(mask, ismask=True).set_duration(duration)
-    
     return vignette.set_mask(mask_clip)
 
-# --- MOTOR DE ZOOM SUAVE + COLOR POP ---
 def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, target_h=1920):
-    # 1. Abrimos la imagen original
     img = Image.open(img_path).convert('RGB')
-    
-    # --- EFECTO 3: COLOR POP (Saturación y Contraste) ---
-    img = ImageEnhance.Color(img).enhance(1.3)     # +30% de color
-    img = ImageEnhance.Contrast(img).enhance(1.15) # +15% de contraste
-
+    img = ImageEnhance.Color(img).enhance(1.3)
+    img = ImageEnhance.Contrast(img).enhance(1.15)
     img_w, img_h = img.size
     target_ratio = target_w / target_h
     img_ratio = img_w / img_h
@@ -83,11 +75,10 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
 
     return VideoClip(make_frame, duration=duration)
 
-
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
-        # 1. Rutas
+        # 1. Rutas Básicas
         audio_main_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_audio_guion.mp3")
         if not os.path.exists(audio_main_path):
             audio_main_path = audio_main_path.replace(".mp3", ".wav")
@@ -95,18 +86,32 @@ def crear_video(req: VideoRequest):
         bg_music_path = os.path.join(MEDIA_FOLDER, req.audio_bg)
         subs_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_subtitulos.ass")
         output_path = os.path.join(MEDIA_FOLDER, req.output_name)
+        
+        # Rutas de los nuevos Assets (Impacto, Textura, CTA)
+        impact_path = os.path.join(MEDIA_FOLDER, req.audio_impact)
+        texture_path = os.path.join(MEDIA_FOLDER, req.texture_img)
+        cta_path = os.path.join(MEDIA_FOLDER, req.cta_img)
 
-        # 2. Audio
+        # 2. Mezcla de Audio Compleja (Voz + Fondo + Impacto)
         main_audio = AudioFileClip(audio_main_path)
         duration = main_audio.duration
+        audio_layers = [main_audio]
         
         if os.path.exists(bg_music_path):
             bg_audio = AudioFileClip(bg_music_path).volumex(0.1).set_duration(duration)
-            final_audio = CompositeAudioClip([main_audio, bg_audio])
-        else:
-            final_audio = main_audio
+            audio_layers.append(bg_audio)
+            
+        # IDEA 1: Añadir el Impacto Grave al inicio (segundo 0)
+        if os.path.exists(impact_path):
+            impact_audio = AudioFileClip(impact_path).volumex(0.8) # Volumen fuerte
+            # Evitar que el impacto alargue el video si es muy largo
+            if impact_audio.duration > duration:
+                impact_audio = impact_audio.subclip(0, duration)
+            audio_layers.append(impact_audio.set_start(0.0))
+            
+        final_audio = CompositeAudioClip(audio_layers)
 
-        # 3. Procesar Imágenes
+        # 3. Procesar Imágenes (Base)
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
@@ -122,31 +127,56 @@ def crear_video(req: VideoRequest):
             zoom_in = (i % 2 == 0)
             
             clip = create_smooth_zoom_clip(path, clip_duration, zoom_in=zoom_in)
-            
             if i > 0:
                 clip = clip.crossfadein(transition_time)
             clips.append(clip)
 
-        # 4. Unir clips base
         base_video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
         base_video = base_video.set_duration(duration)
 
-        # --- EFECTO 4: VIÑETEADO ---
+        # 4. Capas Visuales Superiores
+        video_layers = [base_video]
+        
+        # Capa Viñeteado
         vignette_layer = create_vignette_clip(width=1080, height=1920, duration=duration)
+        video_layers.append(vignette_layer)
 
-        # --- EFECTO 5: FLASH BLANCO INICIAL (CORREGIDO) ---
+        # IDEA 3: Textura Cinematográfica (Polvo/Ruido)
+        if os.path.exists(texture_path):
+            # Cargar imagen, redimensionar a pantalla completa, opacidad 15%
+            texture_clip = ImageClip(texture_path).resize((1080, 1920))
+            # crossfadein/out rápido para que no sea un corte brusco si el video hace loop
+            texture_clip = texture_clip.set_opacity(0.15).set_duration(duration)
+            video_layers.append(texture_clip)
+
+        # Capa Flash Blanco (Hook)
         flash_duration = 0.5
-        # Creamos un cuadro blanco y le decimos que se desvanezca (crossfadeout) en 0.5 segundos
         white_flash = ColorClip(size=(1080, 1920), color=(255, 255, 255)).set_duration(flash_duration)
         white_flash = white_flash.crossfadeout(flash_duration)
+        video_layers.append(white_flash)
 
-        # Juntar capas: Fondo(imágenes) + Sombra(viñeteado) + Destello
-        final_video = CompositeVideoClip([base_video, vignette_layer, white_flash])
-        
-        # Sincronizar audio
+        # IDEA 4: Animación CTA al final (Últimos 3 segundos)
+        cta_duration = 3.0
+        if os.path.exists(cta_path) and duration > cta_duration:
+            start_cta = duration - cta_duration
+            # Cargar logo, hacerlo pequeño (ej. 250px de ancho)
+            cta_clip = ImageClip(cta_path).resize(width=250)
+            
+            # Animación de entrada: deslizar desde la derecha hasta X=750, Y=1000 (zona de botones TikTok)
+            # t es el tiempo local del clip (de 0 a 3)
+            cta_clip = cta_clip.set_position(lambda t: (1080 - (t*500) if t < 0.5 else 800, 1000))
+            
+            # Animación de "latido" (pulso sutil) después de entrar
+            cta_clip = cta_clip.resize(lambda t: 1.0 + 0.05*np.sin(t*10))
+            
+            cta_clip = cta_clip.set_start(start_cta).set_duration(cta_duration).crossfadein(0.3)
+            video_layers.append(cta_clip)
+
+        # 5. Composición Final
+        final_video = CompositeVideoClip(video_layers)
         final_video = final_video.set_audio(final_audio)
 
-        # 5. Renderizado
+        # 6. Renderizado Optimizado
         final_video.write_videofile(
             output_path, 
             fps=30, 
