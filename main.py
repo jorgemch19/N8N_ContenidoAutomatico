@@ -150,7 +150,7 @@ def crear_video(req: VideoRequest):
         if os.path.exists(cta_path) and duration > cta_duration:
             start_cta = duration - cta_duration
             # Cargamos el logo obligando a MoviePy a reconocer la transparencia (has_mask=True)
-            cta_clip = ImageClip(cta_path, has_mask=True).resize(width=250)
+            cta_clip = ImageClip(cta_path).resize(width=250)
             
             # Función de deslizamiento suave desde la derecha
             def cta_slide(t):
