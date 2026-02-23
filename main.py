@@ -78,38 +78,40 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
 
     return VideoClip(make_frame, duration=duration)
 
-def create_text_overlay_image(text, output_path, width=1080, height=250):
-    # Crear imagen transparente
+def create_text_overlay_image(text, output_path, width=1080, height=400):
+    # Imagen transparente
     img = Image.new('RGBA', (width, height), (255, 255, 255, 0))
     draw = ImageDraw.Draw(img)
     
-    # Cargar la fuente descargada en el Dockerfile (estilo TikTok)
+    font_path = "/usr/share/fonts/Montserrat-Black.ttf"
+    
     try:
-        font = ImageFont.truetype("/usr/share/fonts/Montserrat-Black.ttf", 110)
-    except IOError:
+        # Tamaño 120 para que sea muy visual
+        font = ImageFont.truetype(font_path, 120)
+    except:
         font = ImageFont.load_default()
 
-    # Calcular tamaño del texto para centrarlo
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    
-    x = (width - text_w) / 2
-    y = (height - text_h) / 2
+    # Convertimos a MAYÚSCULAS para estilo viral
+    text = text.upper()
 
-    # Dibujar texto con borde grueso (stroke nativo de Pillow)
+    # Centrado
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    x, y = (width - text_w) / 2, (height - text_h) / 2
+
+    # Dibujado con el borde negro (Stroke)
     draw.text(
         (x, y), 
         text, 
         font=font, 
-        fill=(255, 220, 0, 255),    # Amarillo brillante estilo TikTok
-        stroke_width=8,             # Grosor del borde negro
-        stroke_fill=(0, 0, 0, 255)  # Color del borde negro
+        fill=(255, 230, 0, 255),    # Amarillo TikTok
+        stroke_width=15,            # Borde negro muy marcado
+        stroke_fill=(0, 0, 0, 255)  # Color negro
     )
 
     img.save(output_path, "PNG")
     return output_path
-
+    
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
     try:
