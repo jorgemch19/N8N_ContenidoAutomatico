@@ -1,14 +1,17 @@
 FROM python:3.9-slim
 
-# Instalar ffmpeg, wget y descargar la fuente Montserrat-Black para estilo TikTok
+# Instalar ffmpeg y herramientas
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
     libxext6 \
     fonts-liberation \
     wget \
-    && wget -q -O /usr/share/fonts/Montserrat-Black.ttf "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-Black.ttf" \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Descargar Montserrat-Black desde el enlace que funciona
+RUN wget -q --no-check-certificate -O /usr/share/fonts/Montserrat-Black.ttf "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Black.ttf"
 
 WORKDIR /app
 
