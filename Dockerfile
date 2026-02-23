@@ -1,11 +1,13 @@
 FROM python:3.9-slim
 
-# Instalar ffmpeg con soporte para libass y fuentes básicas
+# Instalar ffmpeg, wget y descargar la fuente Montserrat-Black para estilo TikTok
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     libsm6 \
     libxext6 \
     fonts-liberation \
+    wget \
+    && wget -q -O /usr/share/fonts/Montserrat-Black.ttf "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-Black.ttf" \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
