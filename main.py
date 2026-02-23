@@ -246,7 +246,7 @@ def crear_video_2(req: VideoRequestV2):
                 txt_clip = ImageClip(temp_img_path) \
                             .set_start(marcador.tiempo) \
                             .set_duration(texto_duration) \
-                            .set_position(("center", 250)) # Posición Y
+                            .set_position(("center", 175)) # Posición Y
                 
                 txt_clip = txt_clip.crossfadein(0.2)
                 video_layers.append(txt_clip)
