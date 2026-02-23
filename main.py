@@ -1,10 +1,11 @@
 import os
 import re
 import numpy as np
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip, CompositeVideoClip, ColorClip, ImageClip
+from typing import List, Optional
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -75,6 +76,34 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
         return np.array(resized)
 
     return VideoClip(make_frame, duration=duration)
+
+def create_text_overlay_image(text, output_path, width=1080, height=200):
+    # Crear imagen transparente
+    img = Image.new('RGBA', (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(img)
+    
+    # Intentar cargar fuente instalada en Docker, si falla usa default
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 80)
+    except IOError:
+        font = ImageFont.load_default()
+
+    # Calcular tamaño del texto para centrarlo (método compatible con Pillow 9.5.0)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    
+    x = (width - text_w) / 2
+    y = (height - text_h) / 2
+
+    # Dibujar sombra (borde negro) para que se lea bien
+    shadow_offset = 3
+    draw.text((x+shadow_offset, y+shadow_offset), text, font=font, fill=(0, 0, 0, 255))
+    # Dibujar texto principal (Amarillo o Blanco, aquí puse un amarillo tipo TikTok)
+    draw.text((x, y), text, font=font, fill=(255, 220, 0, 255))
+
+    img.save(output_path, "PNG")
+    return output_path
 
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
@@ -187,13 +216,18 @@ def crear_video(req: VideoRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # --- NUEVO MODELO PARA EL VIDEO 2 ---
+class MarcadorTiempo(BaseModel):
+    texto: str     # Ej: "Día 1"
+    tiempo: float  # Ej: 0.0 (segundos)
+
 class VideoRequestV2(BaseModel):
     prefix: str
     output_name: str
     audio_bg: str = "taudio-1.mp3"
     audio_impact: str = "impacto.mp3"
     cta_img: str = "cta.png"
-    num_imagenes: int # Nuevo campo requerido por body
+    num_imagenes: int 
+    marcadores: Optional[List[MarcadorTiempo]] = [] # Nueva lista de tiempos
 
 # --- NUEVO ENDPOINT PARA EL VIDEO 2 ---
 @app.post("/crear-video-2")
@@ -220,11 +254,19 @@ def crear_video_2(req: VideoRequestV2):
             bg_audio = AudioFileClip(bg_music_path).volumex(0.1).set_duration(duration)
             audio_layers.append(bg_audio)
             
-        if os.path.exists(impact_path):
-            impact_audio = AudioFileClip(impact_path).volumex(0.8)
+        # SONIDO DE IMPACTO PARA CADA MARCADOR DE TIEMPO
+        if os.path.exists(impact_path) and req.marcadores:
+            for marcador in req.marcadores:
+                if marcador.tiempo < duration:
+                    # Añade el boom en el segundo exacto
+                    impact_audio = AudioFileClip(impact_path).volumex(0.8).set_start(marcador.tiempo)
+                    audio_layers.append(impact_audio)
+        elif os.path.exists(impact_path) and not req.marcadores:
+            # Si no hay marcadores, ponemos el boom solo al inicio por defecto
+            impact_audio = AudioFileClip(impact_path).volumex(0.8).set_start(0.0)
             if impact_audio.duration > duration:
                 impact_audio = impact_audio.subclip(0, duration)
-            audio_layers.append(impact_audio.set_start(0.0))
+            audio_layers.append(impact_audio)
             
         final_audio = CompositeAudioClip(audio_layers)
 
@@ -233,7 +275,6 @@ def crear_video_2(req: VideoRequestV2):
                      if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
         img_files.sort(key=natural_sort_key)
         
-        # Limitamos la lista al número de imágenes que pases por el body
         img_files = img_files[:req.num_imagenes]
 
         transition_time = 0.5 
@@ -244,38 +285,55 @@ def crear_video_2(req: VideoRequestV2):
             path = os.path.join(MEDIA_FOLDER, filename)
             zoom_in = (i % 2 == 0)
             
-            # Verificamos si es la última imagen
             if i == len(img_files) - 1:
-                # La última imagen dura lo que quede de audio
                 tiempo_restante = duration - tiempo_acumulado
-                # Por seguridad, si el audio era muy corto, le damos un mínimo de 1 segundo
                 tiempo_base_clip = max(1.0, tiempo_restante)
             else:
-                # Imágenes 1, 3, 5... (índices pares: 0, 2, 4) -> 2.5 segundos
                 if i % 2 == 0:
                     tiempo_base_clip = 2.5
-                # Imágenes 2, 4, 6... (índices impares: 1, 3, 5) -> 3.5 segundos
                 else:
                     tiempo_base_clip = 3.5
-                
                 tiempo_acumulado += tiempo_base_clip
 
-            # El clip debe durar su tiempo base + el tiempo de la transición para solaparse bien
             clip_duration = tiempo_base_clip + transition_time
-            
             clip = create_smooth_zoom_clip(path, clip_duration, zoom_in=zoom_in)
             if i > 0:
                 clip = clip.crossfadein(transition_time)
             clips.append(clip)
 
         base_video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
-        base_video = base_video.set_duration(duration) # Obligamos a que cuadre milimétricamente con el audio
+        base_video = base_video.set_duration(duration)
 
-        # 4. Capas Visuales Superiores (Mantenemos TODO igual)
+        # 4. Capas Visuales Superiores
         video_layers = [base_video]
         
         vignette_layer = create_vignette_clip(width=1080, height=1920, duration=duration)
         video_layers.append(vignette_layer)
+
+        # TEXTOS VISUALES EN PANTALLA (LOS MARCADORES)
+        if req.marcadores:
+            for i, marcador in enumerate(req.marcadores):
+                # Calcular cuánto dura en pantalla este texto
+                if i + 1 < len(req.marcadores):
+                    # Dura hasta que empiece el siguiente marcador
+                    texto_duration = req.marcadores[i+1].tiempo - marcador.tiempo
+                else:
+                    # Si es el último, dura hasta el final del video
+                    texto_duration = duration - marcador.tiempo
+                
+                # Crear imagen PNG transparente con el texto
+                temp_img_path = os.path.join(MEDIA_FOLDER, f"temp_marcador_{i}.png")
+                create_text_overlay_image(marcador.texto, temp_img_path)
+                
+                # Convertirlo en clip, ponerlo arriba (y=150) y asignarle sus tiempos
+                txt_clip = ImageClip(temp_img_path) \
+                            .set_start(marcador.tiempo) \
+                            .set_duration(texto_duration) \
+                            .set_position(("center", 150)) # Posición Y = 150px (arriba)
+                
+                # Efecto FadeIn rápido para que entre suave
+                txt_clip = txt_clip.crossfadein(0.3)
+                video_layers.append(txt_clip)
 
         flash_duration = 0.5
         white_flash = ColorClip(size=(1080, 1920), color=(255, 255, 255)).set_duration(flash_duration)
@@ -312,6 +370,12 @@ def crear_video_2(req: VideoRequestV2):
             preset="ultrafast",
             ffmpeg_params=["-vf", f"ass={subs_path}"]
         )
+        
+        # Limpieza de imágenes temporales de texto (opcional)
+        for i in range(len(req.marcadores)):
+            temp_path = os.path.join(MEDIA_FOLDER, f"temp_marcador_{i}.png")
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
         return {"estado": "ok", "video": req.output_name}
 
