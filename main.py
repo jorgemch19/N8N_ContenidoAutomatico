@@ -78,18 +78,18 @@ def create_smooth_zoom_clip(img_path, duration, zoom_in=True, target_w=1080, tar
 
     return VideoClip(make_frame, duration=duration)
 
-def create_text_overlay_image(text, output_path, width=1080, height=200):
+def create_text_overlay_image(text, output_path, width=1080, height=250):
     # Crear imagen transparente
     img = Image.new('RGBA', (width, height), (255, 255, 255, 0))
     draw = ImageDraw.Draw(img)
     
-    # Intentar cargar fuente instalada en Docker, si falla usa default
+    # Cargar la fuente descargada en el Dockerfile (estilo TikTok)
     try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", 80)
+        font = ImageFont.truetype("/usr/share/fonts/Montserrat-Black.ttf", 110)
     except IOError:
         font = ImageFont.load_default()
 
-    # Calcular tamaño del texto para centrarlo (método compatible con Pillow 9.5.0)
+    # Calcular tamaño del texto para centrarlo
     bbox = draw.textbbox((0, 0), text, font=font)
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -97,11 +97,15 @@ def create_text_overlay_image(text, output_path, width=1080, height=200):
     x = (width - text_w) / 2
     y = (height - text_h) / 2
 
-    # Dibujar sombra (borde negro) para que se lea bien
-    shadow_offset = 3
-    draw.text((x+shadow_offset, y+shadow_offset), text, font=font, fill=(0, 0, 0, 255))
-    # Dibujar texto principal (Amarillo o Blanco, aquí puse un amarillo tipo TikTok)
-    draw.text((x, y), text, font=font, fill=(255, 220, 0, 255))
+    # Dibujar texto con borde grueso (stroke nativo de Pillow)
+    draw.text(
+        (x, y), 
+        text, 
+        font=font, 
+        fill=(255, 220, 0, 255),    # Amarillo brillante estilo TikTok
+        stroke_width=8,             # Grosor del borde negro
+        stroke_fill=(0, 0, 0, 255)  # Color del borde negro
+    )
 
     img.save(output_path, "PNG")
     return output_path
