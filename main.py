@@ -324,21 +324,23 @@ def crear_video_2(req: VideoRequestV2):
                     # Dura hasta que empiece el siguiente marcador
                     texto_duration = req.marcadores[i+1].tiempo - marcador.tiempo
                 else:
-                    # Si es el último, dura hasta el final del video
-                    texto_duration = duration - marcador.tiempo
+                    # ES EL ÚLTIMO MARCADOR: Dura exactamente 11 segundos 
+                    # (o menos, si el video termina antes de esos 11 segundos para no dar error)
+                    texto_duration = min(11.0, duration - marcador.tiempo)
                 
                 # Crear imagen PNG transparente con el texto
                 temp_img_path = os.path.join(MEDIA_FOLDER, f"temp_marcador_{i}.png")
                 create_text_overlay_image(marcador.texto, temp_img_path)
                 
-                # Convertirlo en clip, ponerlo arriba (y=150) y asignarle sus tiempos
+                # Convertirlo en clip, ponerlo arriba y asignarle sus tiempos
                 txt_clip = ImageClip(temp_img_path) \
                             .set_start(marcador.tiempo) \
                             .set_duration(texto_duration) \
-                            .set_position(("center", 150)) # Posición Y = 150px (arriba)
+                            .set_position(("center", 180)) # Lo bajé un poquito (Y=180) para que respire por ser más grande
                 
                 # Efecto FadeIn rápido para que entre suave
                 txt_clip = txt_clip.crossfadein(0.3)
+                video_layers.append(txt_clip)
                 video_layers.append(txt_clip)
 
         flash_duration = 0.5
