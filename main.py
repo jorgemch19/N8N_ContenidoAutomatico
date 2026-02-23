@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from moviepy.editor import concatenate_videoclips, AudioFileClip, CompositeAudioClip, VideoClip, CompositeVideoClip, ColorClip, ImageClip
 from typing import List, Optional
+from moviepy.audio.fx.all import audio_loop
 
 app = FastAPI()
 MEDIA_FOLDER = "/media"
@@ -245,30 +246,31 @@ def crear_video_2(req: VideoRequestV2):
         impact_path = os.path.join(MEDIA_FOLDER, req.audio_impact)
         cta_path = os.path.join(MEDIA_FOLDER, req.cta_img)
 
-        # 2. Audio Complejo
+       # 2. Audio Complejo
         main_audio = AudioFileClip(audio_main_path)
         duration = main_audio.duration
         audio_layers = [main_audio]
         
         if os.path.exists(bg_music_path):
-            bg_audio = AudioFileClip(bg_music_path).volumex(0.1).set_duration(duration)
+            bg_audio = AudioFileClip(bg_music_path).volumex(0.1)
+            # ESTA ES LA MAGIA: Si la canción es más corta que el guion, hace un bucle (loop)
+            bg_audio = audio_loop(bg_audio, duration=duration)
             audio_layers.append(bg_audio)
             
         # SONIDO DE IMPACTO PARA CADA MARCADOR DE TIEMPO
         if os.path.exists(impact_path) and req.marcadores:
             for marcador in req.marcadores:
                 if marcador.tiempo < duration:
-                    # Añade el boom en el segundo exacto
                     impact_audio = AudioFileClip(impact_path).volumex(0.8).set_start(marcador.tiempo)
                     audio_layers.append(impact_audio)
         elif os.path.exists(impact_path) and not req.marcadores:
-            # Si no hay marcadores, ponemos el boom solo al inicio por defecto
             impact_audio = AudioFileClip(impact_path).volumex(0.8).set_start(0.0)
             if impact_audio.duration > duration:
                 impact_audio = impact_audio.subclip(0, duration)
             audio_layers.append(impact_audio)
             
-        final_audio = CompositeAudioClip(audio_layers)
+        # SEGURIDAD EXTRA: Cortamos todo el audio fusionado exactamente al milisegundo final del guion
+        final_audio = CompositeAudioClip(audio_layers).set_duration(duration)
 
         # 3. Procesar Imágenes con NUEVA LÓGICA DE TIEMPOS
         img_files = [f for f in os.listdir(MEDIA_FOLDER) 
