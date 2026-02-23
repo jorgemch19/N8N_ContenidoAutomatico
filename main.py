@@ -319,30 +319,28 @@ def crear_video_2(req: VideoRequestV2):
         video_layers.append(vignette_layer)
 
         # TEXTOS VISUALES EN PANTALLA (LOS MARCADORES)
-        if req.marcadores:
+         if req.marcadores:
             for i, marcador in enumerate(req.marcadores):
-                # Calcular cuánto dura en pantalla este texto
+                # Calcular cuánto dura el texto en pantalla
                 if i + 1 < len(req.marcadores):
-                    # Dura hasta que empiece el siguiente marcador
+                    # Dura hasta el siguiente marcador
                     texto_duration = req.marcadores[i+1].tiempo - marcador.tiempo
                 else:
-                    # ES EL ÚLTIMO MARCADOR: Dura exactamente 11 segundos 
-                    # (o menos, si el video termina antes de esos 11 segundos para no dar error)
+                    # EL ÚLTIMO MARCADOR: Dura exactamente 11 segundos
+                    # Pero usamos min para que no intente durar más que el video
                     texto_duration = min(11.0, duration - marcador.tiempo)
                 
-                # Crear imagen PNG transparente con el texto
+                if texto_duration <= 0.1: continue
+
                 temp_img_path = os.path.join(MEDIA_FOLDER, f"temp_marcador_{i}.png")
                 create_text_overlay_image(marcador.texto, temp_img_path)
                 
-                # Convertirlo en clip, ponerlo arriba y asignarle sus tiempos
                 txt_clip = ImageClip(temp_img_path) \
                             .set_start(marcador.tiempo) \
                             .set_duration(texto_duration) \
-                            .set_position(("center", 180)) # Lo bajé un poquito (Y=180) para que respire por ser más grande
+                            .set_position(("center", 250)) # Posición arriba
                 
-                # Efecto FadeIn rápido para que entre suave
-                txt_clip = txt_clip.crossfadein(0.3)
-                video_layers.append(txt_clip)
+                txt_clip = txt_clip.crossfadein(0.2)
                 video_layers.append(txt_clip)
 
         flash_duration = 0.5
