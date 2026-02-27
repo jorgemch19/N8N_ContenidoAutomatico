@@ -137,9 +137,121 @@ def create_text_overlay_image(text, output_path, width=1080, height=400):
 
 @app.post("/crear-video")
 def crear_video(req: VideoRequest):
-    # (Mantengo tu endpoint original tal cual estaba, resumido aquí para no ocupar espacio)
-    # Si lo necesitas completo dímelo, pero el error estaba en el V2.
-    pass 
+    try:
+        # 1. Rutas
+        audio_main_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_audio_guion.mp3")
+        if not os.path.exists(audio_main_path):
+            audio_main_path = audio_main_path.replace(".mp3", ".wav")
+            
+        bg_music_path = os.path.join(MEDIA_FOLDER, req.audio_bg)
+        subs_path = os.path.join(MEDIA_FOLDER, f"{req.prefix}_subtitulos.ass")
+        output_path = os.path.join(MEDIA_FOLDER, req.output_name)
+        
+        impact_path = os.path.join(MEDIA_FOLDER, req.audio_impact)
+        cta_path = os.path.join(MEDIA_FOLDER, req.cta_img)
+
+        # 2. Audio Complejo
+        main_audio = AudioFileClip(audio_main_path)
+        duration = main_audio.duration
+        audio_layers = [main_audio]
+        
+        if os.path.exists(bg_music_path):
+            bg_audio = AudioFileClip(bg_music_path).volumex(0.1)
+            # Aplicamos el fix del loop también aquí para evitar errores
+            bg_audio = audio_loop(bg_audio, duration=duration)
+            audio_layers.append(bg_audio)
+            
+        # Impacto Grave al inicio (Lógica original)
+        if os.path.exists(impact_path):
+            impact_audio = AudioFileClip(impact_path).volumex(0.8)
+            if impact_audio.duration > duration:
+                impact_audio = impact_audio.subclip(0, duration)
+            audio_layers.append(impact_audio.set_start(0.0))
+            
+        final_audio = CompositeAudioClip(audio_layers).set_duration(duration)
+
+        # 3. Procesar Imágenes (Lógica Original: Distribución equitativa)
+        img_files = [f for f in os.listdir(MEDIA_FOLDER) 
+                     if f.startswith(f"{req.prefix}_") and f.endswith(('.png', '.jpg', '.jpeg'))]
+        img_files.sort(key=natural_sort_key)
+
+        num_images = len(img_files)
+        # Aquí dividimos el tiempo total entre el número de imágenes
+        if num_images > 0:
+            base_duration = duration / num_images
+        else:
+            base_duration = duration # Fallback por si hay 0 imágenes
+
+        transition_time = 0.5 
+
+        clips = []
+        for i, filename in enumerate(img_files):
+            path = os.path.join(MEDIA_FOLDER, filename)
+            clip_duration = base_duration + transition_time
+            zoom_in = (i % 2 == 0)
+            
+            clip = create_smooth_zoom_clip(path, clip_duration, zoom_in=zoom_in)
+            if i > 0:
+                clip = clip.crossfadein(transition_time)
+            clips.append(clip)
+
+        if clips:
+            base_video = concatenate_videoclips(clips, method="compose", padding=-transition_time)
+            base_video = base_video.set_duration(duration)
+        else:
+            # Fallback: Video negro si no hay imágenes
+            base_video = ColorClip(size=(1080, 1920), color=(0,0,0), duration=duration)
+
+        # 4. Capas Visuales Superiores
+        video_layers = [base_video]
+        
+        # Capa Viñeteado
+        vignette_layer = create_vignette_clip(width=1080, height=1920, duration=duration)
+        video_layers.append(vignette_layer)
+
+        # Capa Flash Blanco (Hook)
+        flash_duration = 0.5
+        white_flash = ColorClip(size=(1080, 1920), color=(255, 255, 255)).set_duration(flash_duration)
+        white_flash = white_flash.crossfadeout(flash_duration)
+        video_layers.append(white_flash)
+
+        # Animación CTA Limpia
+        cta_duration = 3.0
+        if os.path.exists(cta_path) and duration > cta_duration:
+            start_cta = duration - cta_duration
+            cta_clip = ImageClip(cta_path).resize(width=250)
+            
+            def cta_slide(t):
+                if t < 0.5:
+                    x = 1080 - (280 * (t / 0.5))
+                else:
+                    x = 800 
+                return (x, 1000) 
+
+            cta_clip = cta_clip.set_position(cta_slide).set_start(start_cta).set_duration(cta_duration)
+            video_layers.append(cta_clip)
+
+        # 5. Composición Final
+        final_video = CompositeVideoClip(video_layers)
+        final_video = final_video.set_audio(final_audio)
+
+        # 6. Renderizado Optimizado
+        final_video.write_videofile(
+            output_path, 
+            fps=30, 
+            codec="libx264", 
+            audio_codec="aac",
+            bitrate="5000k",
+            threads=4,
+            preset="ultrafast",
+            ffmpeg_params=["-vf", f"ass={subs_path}"]
+        )
+
+        return {"estado": "ok", "video": req.output_name}
+
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/crear-video-2")
 def crear_video_2(req: VideoRequestV2):
