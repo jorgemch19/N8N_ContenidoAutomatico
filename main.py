@@ -19,7 +19,7 @@ class VideoRequest(BaseModel):
     output_name: str
     audio_bg: str = "taudio-1.mp3"
     audio_impact: str = "impacto.mp3" 
-    cta_img: str = "cta.png"
+    cta_img: str = "p_logo.png"
 
 class MarcadorTiempo(BaseModel):
     texto: str     
@@ -30,7 +30,7 @@ class VideoRequestV2(BaseModel):
     output_name: str
     audio_bg: str = "taudio-1.mp3"
     audio_impact: str = "impacto.mp3"
-    cta_img: str = "cta.png"
+    cta_img: str = "p_logo.png"
     num_imagenes: int 
     marcadores: Optional[List[MarcadorTiempo]] = []
 
